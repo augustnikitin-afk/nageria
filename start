@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Volksspiel – Prototyp</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: "Courier New", Courier, monospace; background:#0b0f0b; color:#7CFC7C; }
+  .panel { border:1px solid #2f5f2f; background:#0f160f; }
+  .btn { border:1px solid #3f8f3f; padding:2px 8px; }
+  .btn:hover:not(:disabled) { background:#7CFC7C; color:#0b0f0b; }
+  .btn:disabled { opacity:.35; cursor:not-allowed; }
+  th { text-align:left; border-bottom:1px solid #2f5f2f; padding:4px 8px; }
+  td { padding:4px 8px; border-bottom:1px dotted #1f3f1f; }
+  select { background:#0b0f0b; border:1px solid #3f8f3f; padding:2px 4px; }
+  .bad { color:#ff7b7b; } .good { color:#ffe97b; } .dim { color:#4f9f4f; }
+</style>
+</head>
+<body class="p-4 max-w-5xl mx-auto text-sm">
+
+<h1 class="text-xl mb-1">&gt; VOLKSSPIEL v0.4 <span class="dim">[Prototyp]</span></h1>
+<div class="mb-3 flex items-center gap-3 flex-wrap">
+  <span class="dim">Runde <span id="turn">1</span></span>
+  <button id="goOnline" class="btn">Online-Modus (Firebase)</button>
+  <span class="dim" id="net">Offline (Bots)</span>
+</div>
+
+<!-- Dashboard -->
+<section class="panel p-3 mb-4">
+  <h2 class="mb-2">[ DASHBOARD ]</h2>
+  <div id="resources" class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3"></div>
+  <div class="flex items-center gap-4">
+    <button id="endTurn" class="btn">Runde beenden &gt;&gt;</button>
+    <span class="dim" id="income"></span>
+  </div>
+</section>
+
+<!-- Volk -->
+<section class="panel p-3 mb-4 overflow-x-auto">
+  <h2 class="mb-2">[ VOLK ] <span class="dim" id="popCount"></span></h2>
+  <table class="w-full">
+    <thead><tr>
+      <th>Name</th><th>Art</th><th>Zufall</th><th>+KO</th><th>Alle</th><th>Attribute</th><th>Aktionen (1 pro Runde)</th>
+    </tr></thead>
+    <tbody id="people"></tbody>
+  </table>
+  <div class="mt-3">
+    <button id="newPerson" class="btn">Neue Person erzeugen (10 KO)</button>
+  </div>
+</section>
+
+<!-- Spielerliste -->
+<section class="panel p-3 mb-4 overflow-x-auto">
+  <h2 class="mb-2">[ SPIELERLISTE ]</h2>
+  <div class="mb-2">
+    Angreifer:
+    <select id="attacker"></select>
+    <span class="dim">Kosten: 5 NA + 5 KR | 10 % Risiko, die Person zu verlieren</span>
+  </div>
+  <table class="w-full">
+    <thead><tr><th>Spieler</th><th>Volk</th><th>NA</th><th>KR</th><th>KO</th><th>ST</th><th>Aktion</th></tr></thead>
+    <tbody id="bots"></tbody>
+  </table>
+</section>
+
+<!-- Log -->
+<section class="panel p-3">
+  <h2 class="mb-2">[ EVENT-LOG ]</h2>
+  <div id="log" class="h-48 overflow-y-auto"></div>
+</section>
+
+<script>
+const RES = ["NA", "KR", "KO", "ST"];
+const RES_NAME = { NA: "Nadeln", KR: "Kronkorken", KO: "Körner", ST: "Stoff" };
+const PERSON_NAMES = ["Alma","Brom","Cira","Dunn","Elke","Fenn","Garo","Hilde","Ivo","Jorun","Kael","Lira","Mott","Nessa","Orin","Pia","Quill","Rune","Sven","Tilda"];
+const BOT_NAMES = ["Kaiser Knopf","Fürstin Fadenreich","Baron Bolzen","Gräfin Garn","Herr Hosenträger"];
+
+// ---- Einstellungen (hier kannst du balancen) ----
+const START_KO = 5;
+const FOOD_WEIGHTS = [[2, 40], [1, 30], [3, 20], [4, 10]]; // [Verbrauch, Gewicht]
+const FAIL_BASE = 1;        // % Grund-Misserfolgschance
+const FAIL_STEP = 5;        // % Anstieg pro bisheriger Verbesserung (= 10 % x 0,5 x (L-1))
+const P_SICK = 2, P_RATS = 1, P_RATS_DEATH = 10; // %
+const UPGRADES = {
+  random: { base: { NA: 1 }, label: "+1 Zufall" },
+  ko:     { base: { KR: 1 }, label: "+1 KO" },
+  all:    { base: { ST: 4 }, label: "+1 Alle" }
+};
+
+const SPECIES = {
+  hausmaus: { name: "Hausmaus", noRandom: true, noAll: true, cheapCare: true, foodMinus: 1, sickW: 1, deathMul: 1,
+    gen: g => { g.KO += 1; } },
+  spitzmaus: { name: "Spitzmaus", sickW: 1, deathMul: 0.5, foodMinus: 0,
+    gen: g => { g.KO += 1; g.NA += 1; if (chance(10)) g.KR++; if (chance(5)) g.ST++; } },
+  waldmaus: { name: "Waldmaus", noAll: true, sickW: 1, deathMul: 1, foodMinus: 0,
+    gen: g => { g.KO += 2; if (chance(20)) g[pick(["KR", "ST", "NA"])]++; } },
+  ratte: { name: "Ratte", sickW: 2, deathMul: 1, foodMinus: 0,
+    gen: g => { g.KR += 1; g.NA += 1; g.ST += 1; if (chance(5)) g.KO += 5; } }
+};
+const canHave = (p, type) => !(type === "random" && SPECIES[p.species].noRandom) && !(type === "all" && SPECIES[p.species].noAll);
+const half = v => Math.ceil(v / 2);
+const feedCost = p => ({ KO: SPECIES[p.species].cheapCare ? half(10) : 10 });
+const healCost = p => SPECIES[p.species].cheapCare ? { KO: half(5), ST: half(10) } : { KO: 5, ST: 10 };
+
+const state = {
+  turn: 1, over: false,
+  res: { NA: 5, KR: 5, KO: START_KO, ST: 5 },
+  people: [], nextId: 1, usedNames: 0,
+  bots: BOT_NAMES.map(n => ({ name: n, people: 3,
+    res: { NA: rnd(3,10), KR: rnd(3,10), KO: rnd(3,10), ST: rnd(3,10) } })),
+  log: [], mode: "offline"
+};
+
+function rnd(a, b) { return Math.floor(Math.random() * (b - a + 1)) + a; }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function chance(pct) { return Math.random() * 100 < pct; }
+function log(msg, cls = "") { state.log.unshift({ turn: state.turn, msg, cls }); if (state.log.length > 300) state.log.pop(); }
+function canPay(c) { return Object.entries(c).every(([r, v]) => state.res[r] >= v); }
+function pay(c) { if (!canPay(c)) return false; for (const [r, v] of Object.entries(c)) state.res[r] -= v; return true; }
+
+function addPerson(species) {
+  const i = state.usedNames++;
+  const name = PERSON_NAMES[i % PERSON_NAMES.length] + (i >= PERSON_NAMES.length ? " " + (Math.floor(i / PERSON_NAMES.length) + 1) : "");
+  const p = { id: state.nextId++, name, species: species || pick(Object.keys(SPECIES)), random: 0, ko: 0, all: 0,
+    status: "ok", t: 0,            // ok | krank | todkrank ; t = Runden am Stück
+    hungry: false, hungerRounds: 0, acted: false };
+  state.people.push(p);
+  return p;
+}
+const person = id => state.people.find(p => p.id === id);
+const bonusActive = p => p.status === "ok" && !p.hungry;
+
+function upCost(p, type) {
+  const L = p[type] + 1;
+  const c = {};
+  for (const [r, v] of Object.entries(UPGRADES[type].base)) c[r] = v * L * L;
+  return c;
+}
+function upFail(p, type) { return Math.min(95, FAIL_BASE + FAIL_STEP * p[type]); }
+const costStr = c => Object.entries(c).map(([r, v]) => `${v} ${r}`).join(" + ");
+
+function removePerson(p, why) {
+  state.people = state.people.filter(x => x !== p);
+  log(`${p.name} ${why}`, "bad");
+  if (state.people.length === 0) { state.over = true; log("Dein Volk ist ausgestorben. GAME OVER.", "bad"); }
+}
+
+// ---- Aktionen ----
+function upgrade(id, type) {
+  const p = person(id);
+  if (state.over || !p || p.acted || !pay(upCost(p, type))) return;
+  p.acted = true;
+  if (chance(upFail(p, type))) log(`Verbesserung (${UPGRADES[type].label}) bei ${p.name} ist misslungen! Kosten verloren.`, "bad");
+  else { p[type]++; log(`${p.name}: ${UPGRADES[type].label} (Stufe ${p[type]}).`, "good"); }
+  render();
+}
+function feedUp(id) {
+  const p = person(id);
+  if (state.over || !p || p.acted || !pay(feedCost(p))) return;
+  p.acted = true; p.hungry = false; p.hungerRounds = 0;
+  log(`${p.name} wurde aufgepäppelt und ist nicht mehr hungrig.`, "good");
+  render();
+}
+function heal(id) {
+  const p = person(id);
+  if (state.over || !p || p.acted || p.status === "ok" || !pay(healCost(p))) return;
+  p.acted = true;
+  if (chance(p.status === "todkrank" ? 10 : 5)) log(`Heilen von ${p.name} ist misslungen! Kosten verloren.`, "bad");
+  else { p.status = "ok"; p.t = 0; log(`${p.name} wurde geheilt.`, "good"); }
+  render();
+}
+function newPerson() {
+  if (state.over || !pay({ KO: 10 })) return;
+  const np = addPerson(); log(`Neue Person im Volk: ${np.name} (${SPECIES[np.species].name}).`, "good");
+  render();
+}
+function attack(i) {
+  const p = person(Number(document.getElementById("attacker").value));
+  const bot = state.bots[i];
+  if (state.over || !p || state.people.length < 2 || !pay({ NA: 5, KR: 5 })) return;
+  const parts = [], loot = {};
+  for (const r of RES) { const a = Math.floor(bot.res[r] * 0.3); loot[r] = a; bot.res[r] -= a; state.res[r] += a; parts.push(`${a} ${r}`); }
+  if (bot.uid && window.Online) window.Online.raid(bot.uid, loot);
+  log(`${p.name} greift ${bot.name} an und plündert: ${parts.join(", ")}.`, "good");
+  if (chance(10 * SPECIES[p.species].deathMul)) removePerson(p, "ist im Kampf gefallen! Alle Boni sind verloren.");
+  render();
+}
+
+// ---- Rundenwechsel ----
+function foodNeed() { let r = Math.random() * 100; for (const [n, w] of FOOD_WEIGHTS) { if ((r -= w) < 0) return n; } return 2; }
+
+function endTurn() {
+  if (state.over) return;
+  // 1) Einkommen
+  const gain = { NA: 0, KR: 0, KO: 0, ST: 0 };
+  for (const p of state.people) {
+    if (p.status !== "ok") continue;
+    SPECIES[p.species].gen(gain);
+    if (p.hungry) continue;
+    for (let k = 0; k < p.random; k++) gain[pick(RES)]++;
+    gain.KO += p.ko;
+    for (const r of RES) gain[r] += p.all;
+  }
+  for (const r of RES) state.res[r] += gain[r];
+  log(`Runde ${state.turn} endet. Einkommen: ` + RES.map(r => `+${gain[r]} ${r}`).join(", ") + ".");
+
+  // 2) Krankheitsverlauf & Hunger-Zähler (nur bereits bestehende Zustände)
+  for (const p of [...state.people]) {
+    if (p.status === "todkrank") {
+      if (chance(10 * (p.t - 1))) { removePerson(p, "ist an seiner Krankheit gestorben."); continue; }
+      p.t++;
+    } else if (p.status === "krank") {
+      p.t++;
+      if (chance(p.t * p.t)) { p.status = "todkrank"; p.t = 1; log(`${p.name} ist todkrank!`, "bad"); }
+    }
+    if (p.hungry) {
+      p.hungerRounds++;
+      if (p.hungerRounds >= 5 && p.status === "ok") { p.status = "krank"; p.t = 0; log(`${p.name} ist durch Hunger krank geworden.`, "bad"); }
+    }
+  }
+  if (state.over) { render(); return; }
+
+  // 3) Körnerverbrauch (möglichst viele satt: kleinster Bedarf zuerst)
+  const needs = state.people.map(p => ({ p, n: Math.max(0, foodNeed() - SPECIES[p.species].foodMinus) })).sort((a, b) => a.n - b.n);
+  let eaten = 0;
+  for (const { p, n } of needs) {
+    const give = Math.min(n, state.res.KO);
+    state.res.KO -= give; eaten += give;
+    if (n > 0 && give === 0 && !p.hungry) { p.hungry = true; p.hungerRounds = 0; log(`${p.name} bekommt keine KO und ist hungrig!`, "bad"); }
+  }
+  log(`Das Volk verbraucht ${eaten} KO.`);
+
+  // 4) Events
+  if (chance(P_SICK)) {
+    const pool = state.people.filter(p => p.status === "ok");
+    let r = Math.random() * pool.reduce((a, p) => a + SPECIES[p.species].sickW, 0);
+    for (const p of pool) {
+      if ((r -= SPECIES[p.species].sickW) < 0) { p.status = "krank"; p.t = 0; log(`${p.name} (${SPECIES[p.species].name}) ist krank geworden.`, "bad"); break; }
+    }
+  }
+  if (chance(P_RATS)) {
+    const pct = rnd(20, 100);
+    const loss = Math.min(Math.floor(state.res.KO * pct / 100), Math.max(0, state.res.KO - START_KO));
+    state.res.KO -= loss;
+    log(`Angriff der Ratten! Du verlierst ${loss} KO (${pct} %).`, "bad");
+    if (chance(P_RATS_DEATH)) removePerson(pick(state.people), "wurde von den Ratten getötet.");
+  }
+
+  // 5) Neue Runde
+  state.people.forEach(p => p.acted = false);
+  state.turn++;
+  if (state.mode !== "online") for (const b of state.bots) { for (const r of RES) b.res[r] += b.people + rnd(0, 2); if (chance(15)) b.people++; }
+  render();
+}
+
+// ---- Rendering ----
+function attrs(p) {
+  const a = [];
+  if (p.hungry) a.push(`<span class="bad">Hungrig (${p.hungerRounds}/5)</span>`);
+  if (p.status === "krank") a.push(`<span class="bad">Krank (${p.t})</span>`);
+  if (p.status === "todkrank") a.push(`<span class="bad">Todkrank (${p.t})</span>`);
+  return a.join(", ") || '<span class="dim">–</span>';
+}
+function personButtons(p) {
+  const off = state.over || p.acted;
+  let h = Object.entries(UPGRADES).filter(([k]) => canHave(p, k)).map(([k, u]) => {
+    const c = upCost(p, k);
+    return `<button class="btn" ${!off && canPay(c) ? "" : "disabled"} title="Schwierigkeit: ${upFail(p, k)} %" onclick="upgrade(${p.id}, '${k}')">${costStr(c)}: ${u.label}</button>`;
+  }).join(" ");
+  if (p.hungry) h += ` <button class="btn" ${!off && canPay(feedCost(p)) ? "" : "disabled"} onclick="feedUp(${p.id})">${costStr(feedCost(p))}: Aufpäppeln</button>`;
+  if (p.status !== "ok") h += ` <button class="btn" ${!off && canPay(healCost(p)) ? "" : "disabled"} title="Schwierigkeit: ${p.status === "todkrank" ? 10 : 5} %" onclick="heal(${p.id})">${costStr(healCost(p))}: Heilen</button>`;
+  return h;
+}
+
+function render() { renderView(); if (state.mode === "online" && window.Online) window.Online.save(); }
+function renderView() {
+  document.getElementById("turn").textContent = state.turn + (state.over ? " (GAME OVER)" : "");
+  document.getElementById("resources").innerHTML = RES.map(r => `
+    <div class="border border-green-900 p-2"><div class="dim">${RES_NAME[r]} (${r})</div><div class="text-lg">${state.res[r]}</div></div>`).join("");
+  const n = state.people.length;
+  document.getElementById("income").textContent = `Verbrauch: 1–4 KO pro Person/Runde (${n} Personen)`;
+  document.getElementById("popCount").textContent = `(${n} Personen)`;
+  document.getElementById("endTurn").disabled = state.over;
+
+  document.getElementById("people").innerHTML = state.people.map(p => `
+    <tr class="${bonusActive(p) ? "" : "opacity-70"}">
+      <td>${p.name}${p.acted ? ' <span class="dim">✓</span>' : ""}</td>
+      <td>${SPECIES[p.species].name}</td>
+      <td>+${p.random}</td><td>+${p.ko}</td><td>+${p.all}</td>
+      <td>${attrs(p)}</td>
+      <td class="space-x-1">${personButtons(p)}</td>
+    </tr>`).join("");
+  document.getElementById("newPerson").disabled = state.over || !canPay({ KO: 10 });
+
+  const sel = document.getElementById("attacker");
+  const prev = sel.value;
+  sel.innerHTML = state.people.map(p => `<option value="${p.id}">${p.name} (${SPECIES[p.species].name})</option>`).join("");
+  if (state.people.some(p => String(p.id) === prev)) sel.value = prev;
+
+  const can = !state.over && canPay({ NA: 5, KR: 5 }) && state.people.length >= 2;
+  document.getElementById("bots").innerHTML = state.bots.map((b, i) => `
+    <tr><td>${b.name}</td><td>${b.people}</td><td>${b.res.NA}</td><td>${b.res.KR}</td><td>${b.res.KO}</td><td>${b.res.ST}</td>
+    <td><button class="btn" ${can ? "" : "disabled"} onclick="attack(${i})">Angreifen</button></td></tr>`).join("");
+
+  document.getElementById("log").innerHTML = state.log.map(l =>
+    `<div class="${l.cls}"><span class="dim">[R${l.turn}]</span> ${l.msg}</div>`).join("");
+}
+
+["hausmaus", "waldmaus", "spitzmaus"].forEach(sp => addPerson(sp));
+log("Willkommen! Dein Volk besteht aus Hausmaus, Waldmaus und Spitzmaus.");
+document.getElementById("endTurn").addEventListener("click", endTurn);
+document.getElementById("newPerson").addEventListener("click", newPerson);
+render();
+</script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, collection, onSnapshot, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+// >>> Firebase-Konsole > Projekteinstellungen > Deine Apps > Web-App > Config hier eintragen <<<
+const FIREBASE_CONFIG = {
+  apiKey: "DEIN_API_KEY",
+  authDomain: "DEIN_PROJEKT.firebaseapp.com",
+  projectId: "DEIN_PROJEKT",
+  appId: "DEINE_APP_ID"
+};
+
+const net = msg => { document.getElementById("net").textContent = msg; };
+let db, uid, myName, lastJson = "", timer;
+
+async function start() {
+  if (FIREBASE_CONFIG.apiKey.startsWith("DEIN")) return net("Firebase-Config fehlt (oben im Modul-Script eintragen).");
+  try {
+    net("Verbinde …");
+    const app = initializeApp(FIREBASE_CONFIG);
+    db = getFirestore(app);
+    uid = (await signInAnonymously(getAuth(app))).user.uid;
+
+    const snap = await getDoc(doc(db, "players", uid));
+    if (snap.exists()) {
+      const d = snap.data();
+      myName = d.name;
+      Object.assign(state, { turn: d.turn, res: d.res, people: d.people, nextId: d.nextId, usedNames: d.usedNames, over: d.over });
+      log("Online-Spielstand geladen.");
+    } else {
+      myName = (prompt("Spielername:") || "").trim().slice(0, 20) || "Maus" + rnd(100, 999);
+    }
+    state.mode = "online";
+    state.bots = [];
+    document.getElementById("goOnline").disabled = true;
+    net(`Online als ${myName}`);
+
+    // Andere Spieler ersetzen die Bots in der Spielerliste
+    onSnapshot(collection(db, "players"), qs => {
+      state.bots = qs.docs.filter(d => d.id !== uid && d.data().people.length > 0)
+        .map(d => ({ uid: d.id, name: d.data().name, people: d.data().people.length, res: d.data().res }));
+      render();
+    });
+    // Überfälle anderer Spieler auf mich
+    onSnapshot(collection(db, "players", uid, "raids"), qs => {
+      qs.docChanges().forEach(ch => {
+        if (ch.type !== "added") return;
+        const d = ch.doc.data(), parts = [];
+        for (const r of RES) { state.res[r] = Math.max(0, state.res[r] - d.loot[r]); parts.push(`${d.loot[r]} ${r}`); }
+        log(`${d.from} hat dich überfallen und geplündert: ${parts.join(", ")}.`, "bad");
+        deleteDoc(ch.doc.ref);
+      });
+      render();
+    });
+    render();
+  } catch (e) { net("Fehler: " + e.message); }
+}
+
+function save() {
+  if (!uid) return;
+  const data = { name: myName, turn: state.turn, res: state.res, people: state.people, nextId: state.nextId, usedNames: state.usedNames, over: state.over };
+  const j = JSON.stringify(data);
+  if (j === lastJson) return;       // nur speichern, wenn sich etwas geändert hat
+  lastJson = j;
+  clearTimeout(timer);
+  timer = setTimeout(() => setDoc(doc(db, "players", uid), { ...data, updatedAt: Date.now() })
+    .catch(e => net("Speichern fehlgeschlagen: " + e.message)), 400);
+}
+
+function raid(target, loot) {
+  addDoc(collection(db, "players", target, "raids"), { from: myName, loot })
+    .catch(e => net("Überfall konnte nicht gesendet werden: " + e.message));
+}
+
+window.Online = { start, save, raid };
+document.getElementById("goOnline").addEventListener("click", start);
+</script>
+</body>
+</html>
