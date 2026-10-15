@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Volksspiel – Prototyp</title>
+<title>Königreich der Mäuse</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body { font-family: "Courier New", Courier, monospace; background:#0b0f0b; color:#7CFC7C; }
